@@ -1,4 +1,4 @@
-#CloudPanel PHP Site Migration Script
+# CloudPanel PHP Site Migration Script
 
 This Bash script automates the migration of PHP sites from one CloudPanel server to another. It handles the following steps:
 
