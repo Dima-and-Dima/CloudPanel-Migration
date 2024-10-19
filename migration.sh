@@ -391,5 +391,21 @@ while IFS="|" read -r site_id domain_name site_user db_name db_user; do
 
 done < <(echo "$php_sites_mysql")
 
-# Step 21: Completion message
-echo "Database setup, FTP user creation, and import process completed." | tee -a "$LOGFILE"
+# Step 21a: Rsync site content from remote server to local server
+while IFS="|" read -r site_id domain_name site_user db_name db_user; do
+    echo "Rsyncing the site content from remote to local for $domain_name..." | tee -a "$LOGFILE"
+    remote_site_dir="/home/$site_user/htdocs/$domain_name/"
+    local_site_dir="/home/$site_user/htdocs/$domain_name/"
+
+    sshpass -p "$ssh_pass" rsync -avz --progress "$ssh_user@$ssh_host:$remote_site_dir" "$local_site_dir"
+
+    if [ $? -eq 0 ]; then
+        echo "Site content for $domain_name copied successfully." | tee -a "$LOGFILE"
+    else
+        echo "Failed to copy site content for $domain_name." | tee -a "$LOGFILE"
+    fi
+
+done < <(echo "$php_sites_mysql")
+
+# Step 22: Completion message
+echo "Database setup, FTP user creation, site content copy, and import process completed." | tee -a "$LOGFILE"
