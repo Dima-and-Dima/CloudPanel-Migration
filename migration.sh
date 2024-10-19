@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Debugging log file
-LOGFILE="/tmp/mysql_dump_debug.log"
+LOGFILE="/tmp/clp_migration_debug.log"
 
 # Credentials log file
 CREDENTIALS_FILE="/tmp/credentials.log"
