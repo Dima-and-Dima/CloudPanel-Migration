@@ -112,7 +112,7 @@ WHERE domain_name = '$domain_name';")
             fi
         fi
 
-        # NEW: Step 9a: Update 'application' and 'varnish_cache' fields
+        # Step 9a: Update 'application' and 'varnish_cache' fields
         echo "Fetching 'application' and 'varnish_cache' from remote database for $domain_name..." | tee -a "$LOGFILE"
         app_varnish=$(sqlite3 "$local_copy_path" "
 SELECT application || '|' || varnish_cache
@@ -122,9 +122,7 @@ WHERE domain_name = '$domain_name';")
 
         # Check if values are not empty
         if [ -n "$application" ] || [ -n "$varnish_cache" ]; then
-            # Escape single quotes in application
             escaped_application=$(echo "$application" | sed "s/'/''/g")
-            # Handle NULL values for SQLite (NULL is represented as empty string)
             [ -z "$escaped_application" ] && application="NULL" || application="'$escaped_application'"
             [ -z "$varnish_cache" ] && varnish_cache="NULL"
 
@@ -141,8 +139,6 @@ WHERE domain_name = '$domain_name';")
         else
             echo "No 'application' or 'varnish_cache' values found for $domain_name in remote database." | tee -a "$LOGFILE"
         fi
-
-        # Continue with the rest of the script...
 
         # Step 10: Copy the Nginx configuration from the remote server
         echo "Copying Nginx configuration for $domain_name..." | tee -a "$LOGFILE"
@@ -170,88 +166,95 @@ WHERE domain_name = '$domain_name';")
             echo "Failed to copy SSL certificate files for $domain_name." | tee -a "$LOGFILE"
         fi
 
+        # Step 21a: Rsync site content from remote server to local server
+        echo "Rsyncing the site content from remote to local for $domain_name..." | tee -a "$LOGFILE"
+        remote_site_dir="/home/$site_user/htdocs/$domain_name/"
+        local_site_dir="/home/$site_user/htdocs/$domain_name/"
+
+        # Create the local directory if it does not exist
+        if [ ! -d "$local_site_dir" ]; then
+            echo "Creating directory $local_site_dir" | tee -a "$LOGFILE"
+            mkdir -p "$local_site_dir"
+            chown "$site_user:$site_user" "$local_site_dir"  # Ensure correct ownership
+        fi
+
+        # Rsync the site content from remote to local
+        sshpass -p "$ssh_pass" rsync -avz --progress "$ssh_user@$ssh_host:$remote_site_dir" "$local_site_dir"
+
+        if [ $? -eq 0 ]; then
+            echo "Site content for $domain_name copied successfully." | tee -a "$LOGFILE"
+        else
+            echo "Failed to copy site content for $domain_name." | tee -a "$LOGFILE"
+        fi
+
         # Step 12: Fetch FTP users for the site from the remote database
-        ftp_users=$(sqlite3 "$local_copy_path" "
+ftp_users=$(sqlite3 "$local_copy_path" "
 SELECT user_name, home_directory
 FROM ftp_user
 WHERE site_id = $site_id;")
 
-        if [ ! -z "$ftp_users" ]; then
-            # Iterate over each FTP user associated with the site
-            echo "$ftp_users" | while IFS="|" read -r ftp_user_name ftp_home_directory; do
-                ftp_password=$(openssl rand -base64 12)
+if [ ! -z "$ftp_users" ]; then
+    echo "$ftp_users" | while IFS="|" read -r ftp_user_name ftp_home_directory; do
+        ftp_password=$(openssl rand -base64 12)
 
-                # Escape single quotes in variables
-                escaped_ftp_user_name=$(echo "$ftp_user_name" | sed "s/'/''/g")
-                escaped_ftp_home_directory=$(echo "$ftp_home_directory" | sed "s/'/''/g")
+        echo "Creating FTP user $ftp_user_name for $domain_name with home directory $ftp_home_directory..." | tee -a "$LOGFILE"
+        
+        # Create the system user and set their home directory
+        adduser --disabled-password --home "$ftp_home_directory" --gecos "" "$ftp_user_name"
+        echo "$ftp_user_name:$ftp_password" | chpasswd
 
-                # Check if the FTP user already exists
-                if id "$ftp_user_name" &>/dev/null; then
-                    echo "FTP user $ftp_user_name already exists. Skipping user creation." | tee -a "$LOGFILE"
-                else
-                    echo "Creating FTP user $ftp_user_name for $domain_name with home directory $ftp_home_directory..." | tee -a "$LOGFILE"
-                    adduser --disabled-password --home "$ftp_home_directory" --gecos "" "$ftp_user_name"
-                    echo "$ftp_user_name:$ftp_password" | chpasswd
+        mkdir -p "$ftp_home_directory"
+        chown "$site_user:$site_user" "$ftp_home_directory"
 
-                    # Ensure the home directory exists
-                    mkdir -p "$ftp_home_directory"
+        # Add FTP user to both the site user's group and ftp-user group
+        usermod -aG "$site_user" "$ftp_user_name"
+        usermod -aG ftp-user "$ftp_user_name"
 
-                    # Ensure the home directory is owned by the FTP user
-                    chown "$ftp_user_name:$ftp_user_name" "$ftp_home_directory"
-                    chmod 755 "$ftp_home_directory"  # Adjust permissions as needed
+        echo "FTP user $ftp_user_name created and added to $site_user and ftp-user groups with home directory $ftp_home_directory." | tee -a "$LOGFILE"
+        echo "FTP User: $ftp_user_name, FTP Password: $ftp_password, Home Directory: $ftp_home_directory" | tee -a "$CREDENTIALS_FILE"
 
-                    # Ensure all files and directories inside are owned by the FTP user
-                    chown -R "$ftp_user_name:$ftp_user_name" "$ftp_home_directory"
-                fi
+        # Step 12a: Insert FTP user into local CloudPanel SQLite database using local_site_id
+        current_time=$(date '+%Y-%m-%d %H:%M:%S')
 
-                # Update SSH configuration if not already present
-                if ! grep -q "Match User $ftp_user_name" /etc/ssh/sshd_config; then
-                    echo "Match User $ftp_user_name" | tee -a /etc/ssh/sshd_config
-                    echo "    ChrootDirectory $ftp_home_directory" | tee -a /etc/ssh/sshd_config
-                    echo "    AllowTCPForwarding no" | tee -a /etc/ssh/sshd_config
-                    echo "    X11Forwarding no" | tee -a /etc/ssh/sshd_config
-                    echo "    ForceCommand internal-sftp" | tee -a /etc/ssh/sshd_config
-                    # Reload SSH to apply changes without interrupting the current connection
-                    systemctl reload ssh
-                else
-                    echo "SSH configuration for FTP user $ftp_user_name already exists. Skipping SSH configuration update." | tee -a "$LOGFILE"
-                fi
+        escaped_ftp_user_name=$(echo "$ftp_user_name" | sed "s/'/''/g")
+        escaped_ftp_home_directory=$(echo "$ftp_home_directory" | sed "s/'/''/g")
 
-                echo "FTP user $ftp_user_name created and restricted to their home directory." | tee -a "$LOGFILE"
+        sqlite3 "$local_db_path" "INSERT INTO ftp_user (site_id, created_at, updated_at, user_name, home_directory) 
+        VALUES ($local_site_id, '$current_time', '$current_time', '$escaped_ftp_user_name', '$escaped_ftp_home_directory');"
 
-                echo "FTP credentials for $domain_name (FTP user: $ftp_user_name):" | tee -a "$CREDENTIALS_FILE"
-                echo "FTP User: $ftp_user_name, FTP Password: $ftp_password, Home Directory: $ftp_home_directory" | tee -a "$CREDENTIALS_FILE"
-
-                # Step 12a: Insert FTP user into local CloudPanel SQLite database using local_site_id
-                current_time=$(date '+%Y-%m-%d %H:%M:%S')
-
-                sqlite3 "$local_db_path" "INSERT INTO ftp_user (site_id, created_at, updated_at, user_name, home_directory) VALUES ($local_site_id, '$current_time', '$current_time', '$escaped_ftp_user_name', '$escaped_ftp_home_directory');"
-
-                if [ $? -eq 0 ]; then
-                    echo "FTP user $ftp_user_name inserted into local CloudPanel database for $domain_name." | tee -a "$LOGFILE"
-                else
-                    echo "Failed to insert FTP user $ftp_user_name into local CloudPanel database for $domain_name." | tee -a "$LOGFILE"
-                fi
-
-            done
+        if [ $? -eq 0 ]; then
+            echo "FTP user $ftp_user_name inserted into local CloudPanel database for $domain_name." | tee -a "$LOGFILE"
         else
-            echo "No FTP users found for $domain_name, skipping FTP setup." | tee -a "$LOGFILE"
+            echo "Failed to insert FTP user $ftp_user_name into local CloudPanel database for $domain_name." | tee -a "$LOGFILE"
         fi
+
+    done
+
+    # Restart ProFTPD after creating all FTP users
+    echo "Restarting ProFTPD service..." | tee -a "$LOGFILE"
+    sudo systemctl restart proftpd
+
+    if [ $? -eq 0 ]; then
+        echo "ProFTPD service restarted successfully." | tee -a "$LOGFILE"
+    else
+        echo "Failed to restart ProFTPD service." | tee -a "$LOGFILE"
+    fi
+
+else
+    echo "No FTP users found for $domain_name, skipping FTP setup." | tee -a "$LOGFILE"
+fi
 
         # Step 13: Fetch and add cron jobs
         cron_jobs=$(sqlite3 "$local_copy_path" "
-SELECT c.minute, c.hour, c.day, c.month, c.weekday, c.command
-FROM cron_job c
-WHERE c.site_id = $site_id;")
+        SELECT c.minute, c.hour, c.day, c.month, c.weekday, c.command
+        FROM cron_job c
+        WHERE c.site_id = $site_id;")
 
         if [ ! -z "$cron_jobs" ]; then
             cron_file="/etc/cron.d/$site_user"
             echo "$cron_jobs" | while IFS="|" read -r minute hour day month weekday command; do
                 echo "$minute $hour $day $month $weekday $command" >> "$cron_file"
-
-                # Step 13a: Insert cron job into local CloudPanel SQLite database using local_site_id
                 current_time=$(date '+%Y-%m-%d %H:%M:%S')
-                # Escape single quotes in all cron timing variables and the command
                 escaped_minute=$(echo "$minute" | sed "s/'/''/g")
                 escaped_hour=$(echo "$hour" | sed "s/'/''/g")
                 escaped_day=$(echo "$day" | sed "s/'/''/g")
@@ -266,7 +269,6 @@ WHERE c.site_id = $site_id;")
                 else
                     echo "Failed to insert cron job into local CloudPanel database for $domain_name." | tee -a "$LOGFILE"
                 fi
-
             done
             chmod 644 "$cron_file"
             echo "Cron jobs added for $site_user in $cron_file." | tee -a "$LOGFILE"
@@ -311,8 +313,6 @@ while IFS="|" read -r site_id domain_name site_user db_name db_user; do
     echo "Processing site: $domain_name with DB name: $db_name and DB user: $db_user" | tee -a "$LOGFILE"
 
     remote_backup_dir="/home/$site_user/backups"
-
-    # Ensure there is no double-slash issue in the paths
     remote_sql_file="${remote_backup_dir}/${db_name}.sql.gz"
 
     # Step 16: Dump the MySQL database using clpctl in the background
@@ -388,22 +388,6 @@ while IFS="|" read -r site_id domain_name site_user db_name db_user; do
 
     echo "Finished setting up database for site: $domain_name" | tee -a "$LOGFILE"
     echo "--------------------------------------" | tee -a "$LOGFILE"
-
-done < <(echo "$php_sites_mysql")
-
-# Step 21a: Rsync site content from remote server to local server
-while IFS="|" read -r site_id domain_name site_user db_name db_user; do
-    echo "Rsyncing the site content from remote to local for $domain_name..." | tee -a "$LOGFILE"
-    remote_site_dir="/home/$site_user/htdocs/$domain_name/"
-    local_site_dir="/home/$site_user/htdocs/$domain_name/"
-
-    sshpass -p "$ssh_pass" rsync -avz --progress "$ssh_user@$ssh_host:$remote_site_dir" "$local_site_dir"
-
-    if [ $? -eq 0 ]; then
-        echo "Site content for $domain_name copied successfully." | tee -a "$LOGFILE"
-    else
-        echo "Failed to copy site content for $domain_name." | tee -a "$LOGFILE"
-    fi
 
 done < <(echo "$php_sites_mysql")
 
