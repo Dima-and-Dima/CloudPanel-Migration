@@ -63,7 +63,7 @@ Example Workflow
 
 Logging and Debugging
 
-All output and errors are logged to /tmp/mysql_dump_debug.log, making it easy to troubleshoot any problems that arise during the migration.
+All output and errors are logged to /tmp/clp_migration_debug.log, making it easy to troubleshoot any problems that arise during the migration.
 Customization
 
 You can modify the script to adjust:
